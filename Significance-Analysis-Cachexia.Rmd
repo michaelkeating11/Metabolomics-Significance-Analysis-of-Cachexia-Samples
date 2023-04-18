@@ -1,0 +1,170 @@
+---
+title: "Identifying differentially abundant urinary metabolites in cachexic patients"
+author: "Michael Keating"
+output:
+  #html_document: null
+df_print: paged
+---
+* Data is publicly available at https://link.springer.com/article/10.1007/s11306-010-0232-9
+* Urinary metabolite concentration data measured by 1H NMR from 77 human cancer patients.
+
+
+```{r setup-chunk, include=FALSE}
+knitr::opts_chunk$set(
+  cache = FALSE,
+  dev = "png",
+  dpi = 300
+)
+```
+
+Load the packages that will be used to perform the analysis
+
+```{r, Package Loading, echo=T,results=T,warning=F,message=F}
+pacman::p_load(htmlTable,ggplot2,matrixStats,effsize,pwr,dplyr,gtools,coin,rlist,reshape2,glmnet,xgboost,caret)
+
+```
+
+Load in the data and view number of samples
+```{r, Import and Explore Data, echo=T,results=T,warning=F}
+
+data<-read.csv("human_cachexia.csv",header=F)
+colnames(data)<-data[1,]
+data<-data[-1,]
+
+htmlTable(head(data[,1:6]), css.cell = "padding-left: 3px; padding-right: 3px; text-align:center;", 
+          colWidths = "30px", align = "c", rnames = FALSE, 
+          caption = "", 
+          css.table = "width:100%; white-space: nowrap; overflow-x: auto;")
+
+```
+The data has annotated metabolites in the columns and the samples in rows. Annotations were based on chemical shift matches in the 1H NMR spectra. We shouldn't have to normalize these values because they are actual concentrations, but we should still visualize the distribution of some metabolites between cachexic and control groups
+
+```{r, Convert data formats from character to either factor for our class label or numeric for our continuous intensities, results=F,echo=F}
+data$`Patient ID`<-NULL
+data$`Muscle loss`<-as.factor(data$`Muscle loss`)
+data$Label<-data$`Muscle loss`
+data$`Muscle loss`<-NULL
+
+# identify character columns
+char_cols <- sapply(data, is.character)
+
+# convert character columns to numeric
+data[char_cols] <- apply(data[char_cols], 2, as.numeric)
+
+```
+
+```{r, Plot intensity distribution of m/z values, echo=T,results=T,warning=F}
+
+ggplot(data, aes(x = Lysine, fill = Label)) +
+  geom_density(alpha = 0.5) +
+  xlab("Concentration of Lysine") +
+  ylab("Density") +
+  ggtitle("Distribution of Lysine Concentration by Class")+
+  theme_bw()+
+  xlim(0,200)
+
+
+```
+
+The purpose of this notebook is to identify differentially abundant urinary metabolites, so we want to perform significance testing and calculate a p value for every metabolite between cachexic and control samples. It is important to consider that I will be performing many comparisons so I will use the Bonferroni correction to adjust my p values for multiple testing. 
+
+```{r, Calculate mean difference for every metabolite between classes and visualize FDR corrected p values, echo=T,warning=F}
+
+data_no_label <- data[colnames(data)!="Label"]
+
+# Calculate the mean difference in concentration for each metabolite
+mean_diff <- apply(data_no_label, 2, function(x) mean(x[data$Label == "cachexic"], na.rm = TRUE) - mean(x[data$Label == "control"], na.rm = TRUE))
+
+# Calculate the -log10(p-value) for each metabolite
+p_values <- apply(data_no_label, 2, function(x) t.test(x ~ data$Label)$p.value*(length(colnames(data_no_label))))
+
+index <- seq(1, ncol(data_no_label))
+
+# Combine the index and corrected p-values into one data frame
+pval_data <- data.frame(Index = index, PValue = p_values)
+pval_data$Significant <- ifelse(pval_data$PValue < 0.05, "Significant", "Not significant")
+
+# Plot the Bonferroni-corrected p-values
+ggplot(pval_data, aes(x = Index, y = PValue, color = Significant)) +
+  geom_point(shape=21,fill="white",size=3) +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "black") +
+  scale_color_manual(values = c("Significant" = "forest green", "Not significant" = "black")) +
+  xlab("Index") +
+  ylab("Bonferroni Corrected P-values") +
+  ggtitle("Bonferroni Corrected P-values")+
+  labs(color = "FDR Corrected p value < 0.05?")+
+  ylim(-1,1)+
+  theme_bw()
+```
+
+Of all urinary metabolites measured only a subset (12/63) of them had significantly different concentrations between cachexic and control samples. It is straightforward to identify these metabolites and plot the distribution of their concentrations. For example, Valine was a metabolite that was identified as differentially abundant between classes based on the t-test + FDR correction so I will plot the distribution of Valine concentrations.
+
+```{r, Visualize concentration distribution for differentially abundant urinary metabolites,echo=T,warning=F}
+significant_p_values<-pval_data[pval_data$Significant=="Significant",]
+
+ggplot(data, aes(x = Valine, fill = Label)) +
+  geom_density(alpha = 0.5) +
+  xlab("Concentration of Valine") +
+  ylab("Density") +
+  ggtitle("Distribution of Valine Concentration by Class")+
+  theme_bw()+
+  xlim(-20,150)
+
+```
+
+There aren't that many metabolites that had significant p values so I can go a step further and create a faceted plot to visualize the distribution of concentrations for every metabolite that was differentially abundant between classes.
+
+```{r, Simultaneously visualize distribution for all differentially abundant urinary metabolites,echo=T,warning=F }
+
+differentially_abundant_metabolites<-data[,significant_p_values$Index]
+differentially_abundant_metabolites$Label<-data$Label
+
+df_long <- reshape2::melt(differentially_abundant_metabolites, id.vars = "Label")
+
+# Create ggplot object
+ggplot(df_long, aes(x = value, fill = Label)) + 
+  geom_density(alpha = 0.5) +
+  facet_wrap(~variable, scales = "free") +
+  labs(x = "Concentration", y = "Density") +
+  theme_classic()
+  
+
+```
+
+
+Even though these metabolites are significantly different in concentration between cachexic and control samples based on the analysis, there is overlap between the distributions of concentrations. None of these metabolites are true biomarkers, meaning they are not unique based on whether or not a patient has cachexia. Instead, it appears that there are varying degrees of fluctuation in the concentration of these metabolites.
+
+```{r, Can we classify samples as either control or cachexic based on metabolite concentrations,warning=F}
+xtrain<-differentially_abundant_metabolites
+ytrain<-xtrain$Label
+xtrain$Label<-NULL
+
+set.seed(1111)
+glmnet_model<-cv.glmnet(x=data.matrix(xtrain),y=ytrain,nfolds=5,type.measure=c("class"),family="binomial",alpha=0,standardize=F)
+plot(glmnet_model)
+
+
+```
+Above is the output of a fit a regularized (ridge L2 regularization) logistic regression model using our significantly different metabolites. I use 5-fold cross validation to iterate through different values of the lambda penalty parameters where each point on this plot is a model with a different penalty parameter. The dashed lines on this plot indicate the best performing model based on misclassification error. Based on this model it appears using the concentrations of our urinary metabolites we can classify cachexic samples with about a 70% accuracy. I will also fit a boosted trees classification model to see if that has a better out of box performance.
+
+
+
+```{r, Can we improve classifiation performance using gradient boosted trees instead of regularized logistic regression,warning=F,message=F,echo=T}
+set.seed(1111)
+ctrl <- trainControl(method = "cv", 
+                     number = 5,
+                     summaryFunction = multiClassSummary)
+
+model <- train(x = xtrain,
+               y = ytrain,
+               method = "xgbTree",
+               trControl = ctrl,verbosity=0)
+
+
+performance <- model$results
+best_performance<-max(performance$Accuracy)
+best_performance
+
+```
+
+Both initial attempts at classification of cachexic samples based on the urinary metabolite concentrations resulted in models that perform approximately the same with 70-80% classification accuracies. I could spend a lot of time tuning the hyperparameters and probability thresholds for classification to improve classification. I could also evaluate the performance of other classification models on this data. However, I am satisfied with these results for now and will choose another project to explore the optimization of different classification models in more detail. 
